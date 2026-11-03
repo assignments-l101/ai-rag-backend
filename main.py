@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from database import supabase
-from routers import auth, tenants, documents, rag, audit_logs # تم استيراد الراوترات الخاصة بالـ auth والـ tenants معاً
+from routers import auth, tenants, documents, rag, audit_logs, dashboard, data_sources, analytics, reports # تم استيراد الراوترات الخاصة بالـ auth والـ tenants معاً
 
 app = FastAPI(
     title="AI & RAG Platform Backend",
@@ -24,6 +24,9 @@ app.include_router(tenants.router)
 app.include_router(documents.router)
 app.include_router(rag.router)
 app.include_router(audit_logs.router)
+app.include_router(data_sources.router)
+app.include_router(analytics.router)
+app.include_router(reports.router)
 
 # 🏠 مسار تجريبي للتأكد أن السيرفر يعمل
 @app.get("/")
