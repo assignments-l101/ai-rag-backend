@@ -27,6 +27,8 @@ app.include_router(audit_logs.router)
 app.include_router(data_sources.router)
 app.include_router(analytics.router)
 app.include_router(reports.router)
+app.include_router(dashboard.router)
+
 
 # 🏠 مسار تجريبي للتأكد أن السيرفر يعمل
 @app.get("/")
@@ -34,7 +36,7 @@ def read_root():
     return {
         "status": "success",
         "message": "AI & RAG Backend is running successfully!",
-        "database": "Connected to Supabase"
+        "database": "not_checked"
     }
 
 # 🔍 مسار تجريبي للتحقق من الاتصال بقاعدة البيانات
