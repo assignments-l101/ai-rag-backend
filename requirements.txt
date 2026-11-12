@@ -1,8 +1,11 @@
 fastapi==0.110.0
 uvicorn==0.28.0
 supabase==2.3.0
+gotrue==2.4.2
+postgrest==0.13.2
 httpx==0.24.1
 pydantic==2.6.4
+email-validator==2.1.1
 python-dotenv==1.0.1
 requests==2.31.0
-python-multipart==0.0.9
+python-multipart==0.0.32

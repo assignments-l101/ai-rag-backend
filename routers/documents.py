@@ -1,7 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel
-from routers.auth import get_current_user
-from database import supabase
+from routers.auth import get_current_user, get_user_db
 
 router = APIRouter(prefix="/api/v1/documents", tags=["Documents & Data Sources"])
 
@@ -16,13 +15,14 @@ async def upload_document(
     file: UploadFile = File(...),
     title: str = Form(...),
     department: str = Form(default="عام"),
-    user = Depends(get_current_user)
+    user = Depends(get_current_user),
+    user_db = Depends(get_user_db)
 ):
     user_id = user.id
     
     try:
         # 1. معرف المؤسسة التي ينتمي إليها المستخدم وعزل البيانات
-        membership = supabase.table("tenant_members").select("tenant_id, role").eq("user_id", user_id).execute()
+        membership = user_db.table("tenant_members").select("tenant_id, role").eq("user_id", user_id).execute()
         if not membership.data or len(membership.data) == 0:
             raise HTTPException(status_code=403, detail="User does not belong to any tenant")
             
@@ -37,7 +37,7 @@ async def upload_document(
         file_ext = file.filename.split(".")[-1].upper() if "." in file.filename else "FILE"
         
         # 3. تسجيل معلومات المستند في جدول documents بالحقول التي تتوافق مع الفرونت إند
-        doc_res = supabase.table("documents").insert({
+        doc_res = user_db.table("documents").insert({
             "tenant_id": tenant_id,
             "title": title,
             "file_name": file.filename,
@@ -64,18 +64,18 @@ async def upload_document(
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("")
-def list_documents(user = Depends(get_current_user)):
+def list_documents(user = Depends(get_current_user), user_db = Depends(get_user_db)):
     user_id = user.id
     try:
         # 1. جلب المؤسسة الخاصة بالمستخدم
-        membership = supabase.table("tenant_members").select("tenant_id").eq("user_id", user_id).execute()
+        membership = user_db.table("tenant_members").select("tenant_id").eq("user_id", user_id).execute()
         if not membership.data:
             raise HTTPException(status_code=403, detail="User does not belong to any tenant")
             
         tenant_id = membership.data[0]["tenant_id"]
         
         # 2. جلب جميع المستندات الخاصة بهذه المؤسسة فقط (تطبيق مبدأ الـ RLS والعزل)
-        docs_res = supabase.table("documents").select("*").eq("tenant_id", tenant_id).execute()
+        docs_res = user_db.table("documents").select("*").eq("tenant_id", tenant_id).execute()
         
         # تجهيز وتحسين البيانات المرسلة لتطابق تماماً الـ JSON المتوقع في الفرونت إند
         formatted_docs = []

@@ -1,16 +1,15 @@
 from fastapi import APIRouter, Depends, HTTPException
-from routers.auth import get_current_user
-from database import supabase
+from routers.auth import get_current_user, get_user_db
 
 router = APIRouter(prefix="/api/v1/audit-logs", tags=["Audit Logs & Security"])
 
 @router.get("")
-def get_audit_logs(user = Depends(get_current_user)):
+def get_audit_logs(user = Depends(get_current_user), user_db = Depends(get_user_db)):
     user_id = user.id
     
     try:
         # 1. التحقق من المؤسسة التي ينتمي إليها المستخدم
-        membership = supabase.table("tenant_members").select("tenant_id, role").eq("user_id", user_id).execute()
+        membership = user_db.table("tenant_members").select("tenant_id, role").eq("user_id", user_id).execute()
         if not membership.data or len(membership.data) == 0:
             raise HTTPException(status_code=403, detail="User does not belong to any tenant")
             
@@ -22,7 +21,7 @@ def get_audit_logs(user = Depends(get_current_user)):
             raise HTTPException(status_code=403, detail="Access denied: Only owners or admins can view audit logs")
             
         # 3. جلب سجلات التدقيق الخاصة بالمؤسسة من جدول audit_logs
-        logs_res = supabase.table("audit_logs").select("*").eq("tenant_id", tenant_id).order("created_at", desc=True).execute()
+        logs_res = user_db.table("audit_logs").select("*").eq("tenant_id", tenant_id).order("created_at", desc=True).execute()
         
         return {
             "status": "success",

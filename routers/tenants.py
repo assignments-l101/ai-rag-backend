@@ -1,49 +1,41 @@
+import logging
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from routers.auth import get_current_user
-from database import supabase
-from routers import auth, tenants
+from postgrest import SyncPostgrestClient
 
+from routers.auth import get_current_user, get_user_db
+
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/tenants", tags=["Tenants"])
+
 
 class TenantCreate(BaseModel):
     name: str
 
+
 @router.post("")
-def create_tenant(payload: TenantCreate, user = Depends(get_current_user)):
-    user_id = user.id
-    
+def create_tenant(
+    payload: TenantCreate,
+    user: Any = Depends(get_current_user),
+    user_db: SyncPostgrestClient = Depends(get_user_db),
+):
     try:
-        # 1. التحقق مسبقاً هل للمستخدم مؤسسة مرتبطة به
-        existing_membership = supabase.table("tenant_members").select("*").eq("user_id", user_id).execute()
-        if existing_membership.data and len(existing_membership.data) > 0:
-            raise HTTPException(status_code=409, detail="User already belongs to a tenant")
-            
-        # 2. إنشاء المؤسسة الجديدة في جدول tenants
-        tenant_res = supabase.table("tenants").insert({"name": payload.name}).execute()
-        if not tenant_res.data:
-            raise HTTPException(status_code=500, detail="Failed to create tenant")
-            
-        tenant_id = tenant_res.data[0]["id"]
-        
-        # 3. ربط المستخدم بالمؤسسة كـ Owner في جدول tenant_members
-        member_res = supabase.table("tenant_members").insert({
-            "tenant_id": tenant_id,
-            "user_id": user_id,
-            "role": "owner"
-        }).execute()
-        
-        if not member_res.data:
-            raise HTTPException(status_code=500, detail="Failed to assign user as owner")
-            
+        result = user_db.rpc(
+            "create_tenant_for_current_user", {"p_name": payload.name}
+        ).execute()
+        if not result.data:
+            raise HTTPException(status_code=500, detail="Tenant was not created")
+
         return {
             "status": "success",
-            "message": "Tenant created successfully",
-            "tenant_id": tenant_id,
-            "name": payload.name
+            "message": "Tenant created or already assigned",
+            "tenant_id": str(result.data),
+            "name": payload.name,
         }
-        
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Tenant creation failed for user %s", user.id)
+        raise HTTPException(status_code=500, detail="Could not create tenant")

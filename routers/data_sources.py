@@ -1,8 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
-from routers.auth import get_current_user
-from database import supabase
+from routers.auth import get_current_user, get_user_db
 
 router = APIRouter(prefix="/api/v1/data-sources", tags=["Data Sources"])
 
@@ -14,17 +13,17 @@ class DataSourceCreate(BaseModel):
     database_name: str
 
 @router.get("")
-def get_data_sources(user = Depends(get_current_user)):
+def get_data_sources(user = Depends(get_current_user), user_db = Depends(get_user_db)):
     user_id = user.id
     try:
         # 1. التحقق من المؤسسة لتطبيق العزل الأمني
-        membership = supabase.table("tenant_members").select("tenant_id").eq("user_id", user_id).execute()
+        membership = user_db.table("tenant_members").select("tenant_id").eq("user_id", user_id).execute()
         if not membership.data:
             raise HTTPException(status_code=403, detail="User does not belong to any tenant")
         tenant_id = membership.data[0]["tenant_id"]
         
         # 2. جلب مصادر البيانات الخاصة بالمؤسسة
-        ds_res = supabase.table("data_sources").select("*").eq("tenant_id", tenant_id).execute()
+        ds_res = user_db.table("data_sources").select("*").eq("tenant_id", tenant_id).execute()
         
         # إذا لم تكن هناك مصادر مسجلة بعد، نرجع عينة تجريبية تتوافق مع الفرونت إند
         if not ds_res.data:
@@ -49,15 +48,15 @@ def get_data_sources(user = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("")
-def create_data_source(payload: DataSourceCreate, user = Depends(get_current_user)):
+def create_data_source(payload: DataSourceCreate, user = Depends(get_current_user), user_db = Depends(get_user_db)):
     user_id = user.id
     try:
-        membership = supabase.table("tenant_members").select("tenant_id").eq("user_id", user_id).execute()
+        membership = user_db.table("tenant_members").select("tenant_id").eq("user_id", user_id).execute()
         if not membership.data:
             raise HTTPException(status_code=403, detail="User does not belong to any tenant")
         tenant_id = membership.data[0]["tenant_id"]
         
-        new_ds = supabase.table("data_sources").insert({
+        new_ds = user_db.table("data_sources").insert({
             "tenant_id": tenant_id,
             "name": payload.name,
             "type": payload.type,
@@ -87,9 +86,9 @@ def test_data_source_connection(source_id: str, user = Depends(get_current_user)
     }
 
 @router.delete("/{source_id}")
-def delete_data_source(source_id: str, user = Depends(get_current_user)):
+def delete_data_source(source_id: str, user = Depends(get_current_user), user_db = Depends(get_user_db)):
     try:
-        supabase.table("data_sources").delete().eq("id", source_id).execute()
+        user_db.table("data_sources").delete().eq("id", source_id).execute()
         return {
             "status": "success",
             "message": "Data source deleted successfully"

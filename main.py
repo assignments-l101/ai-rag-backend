@@ -29,7 +29,6 @@ app.include_router(analytics.router)
 app.include_router(reports.router)
 app.include_router(dashboard.router)
 
-
 # 🏠 مسار تجريبي للتأكد أن السيرفر يعمل
 @app.get("/")
 def read_root():
@@ -43,11 +42,10 @@ def read_root():
 @app.get("/api/v1/health-check")
 def health_check():
     try:
-        response = supabase.table("tenants").select("*").execute()
+        response = supabase.table("tenants").select("id").limit(1).execute()
         return {
             "status": "healthy",
-            "database_connection": "OK",
-            "tenants_count": len(response.data)
+            "database_connection": "OK"
         }
     except Exception as e:
         return {

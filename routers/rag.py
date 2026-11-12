@@ -1,8 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
-from routers.auth import get_current_user
-from database import supabase
+from routers.auth import get_current_user, get_user_db
 
 router = APIRouter(prefix="/api/v1/chat", tags=["RAG & AI Engine"])
 
@@ -12,20 +11,20 @@ class QueryRequest(BaseModel):
     session_id: Optional[str] = None
 
 @router.post("/query")
-def answer_question(payload: QueryRequest, user = Depends(get_current_user)):
+def answer_question(payload: QueryRequest, user = Depends(get_current_user), user_db = Depends(get_user_db)):
     user_id = user.id
     
     try:
         # 1. التحقق من مؤسسة المستخدم للالتزام بالعزل الأمني (RLS)
-        membership = supabase.table("tenant_members").select("tenant_id").eq("user_id", user_id).execute()
+        membership = user_db.table("tenant_members").select("tenant_id").eq("user_id", user_id).execute()
         if not membership.data or len(membership.data) == 0:
             raise HTTPException(status_code=403, detail="User does not belong to any tenant")
             
         tenant_id = membership.data[0]["tenant_id"]
         
         # 2. استرجاع المستندات المتاحة للمؤسسة لبناء السياق (Context Retrieval)
-        docs_res = supabase.table("documents").select("id, title, file_name, status").eq("tenant_id", tenant_id).execute()
-        
+        docs_res = user_db.table("documents").select("id, file_name, status").eq("tenant_id", tenant_id).execute()
+
         docs_list = docs_res.data if docs_res.data else []
         sources_list = []
         

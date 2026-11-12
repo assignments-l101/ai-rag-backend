@@ -1,22 +1,21 @@
 from fastapi import APIRouter, Depends, HTTPException
-from routers.auth import get_current_user
-from database import supabase
+from routers.auth import get_current_user, get_user_db
 
 router = APIRouter(prefix="/api/v1/dashboard", tags=["Dashboard"])
 
 @router.get("/summary")
-def get_dashboard_summary(user = Depends(get_current_user)):
+def get_dashboard_summary(user = Depends(get_current_user), user_db = Depends(get_user_db)):
     user_id = user.id
     try:
         # 1. معرفة المؤسسة التي ينتمي إليها المستخدم
-        membership = supabase.table("tenant_members").select("tenant_id").eq("user_id", user_id).execute()
+        membership = user_db.table("tenant_members").select("tenant_id").eq("user_id", user_id).execute()
         if not membership.data or len(membership.data) == 0:
             raise HTTPException(status_code=403, detail="User does not belong to any tenant")
             
         tenant_id = membership.data[0]["tenant_id"]
 
         # 2. جلب عدد المستندات المرفوعة الفعلية الخاصة بهذه المؤسسة
-        docs_res = supabase.table("documents").select("id", count="exact").eq("tenant_id", tenant_id).execute()
+        docs_res = user_db.table("documents").select("id", count="exact").eq("tenant_id", tenant_id).execute()
         docs_count = docs_res.count if docs_res.count is not None else len(docs_res.data or [])
 
         # 3. صياغة استجابة لوحة التحكم بالطريقة التي طلبها الفرونت إند

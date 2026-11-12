@@ -1,164 +1,222 @@
-from fastapi import APIRouter, Depends, HTTPException, Header
+import logging
+from typing import Any, Optional
+
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, EmailStr
-from database import supabase
+from postgrest import SyncPostgrestClient
 
+from database import create_user_database_client, supabase
+
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/auth", tags=["Authentication"])
+bearer_scheme = HTTPBearer(auto_error=False)
 
-# نموذج بيانات التسجيل
+
 class SignupRequest(BaseModel):
     name: str
     email: EmailStr
     password: str
     organization_name: str
 
-# نموذج بيانات تسجيل الدخول
+
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
 
-# 🛡️ دالة التحقق من الـ JWT واستخراج المستخدم
-async def get_current_user(authorization: str = Header(...)):
+
+def get_access_token(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+) -> str:
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=401,
+            detail="Bearer access token required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return credentials.credentials
+
+
+def get_current_user(token: str = Depends(get_access_token)):
     try:
-        # استخراج التوكن من ترويسة الطلب (Bearer Token)
-        token = authorization.split(" ")[1]
-        
-        # التحقق من صحة التوكن عبر Supabase Auth
         user_response = supabase.auth.get_user(token)
         if not user_response or not user_response.user:
             raise HTTPException(status_code=401, detail="Invalid authentication token")
-            
         return user_response.user
-    except Exception as e:
-        raise HTTPException(status_code=401, detail=f"Authentication failed: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Supabase get_user failed")
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication failed",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
-# 📝 مسار تسجيل حساب جديد (مع إنشاء المؤسسة وربطها تلقائياً)
+
+def get_user_db(
+    token: str = Depends(get_access_token),
+    _user: Any = Depends(get_current_user),
+):
+    """Yield a user-scoped database client and close its HTTP session per request."""
+    client = create_user_database_client(token)
+    try:
+        yield client
+    finally:
+        client.aclose()
+
+
+def _create_tenant_for_user(
+    user_db: SyncPostgrestClient, organization_name: str
+):
+    result = user_db.rpc(
+        "create_tenant_for_current_user", {"p_name": organization_name}
+    ).execute()
+    if not result.data:
+        raise RuntimeError("Tenant provisioning RPC returned no tenant id")
+    return result.data
+
+
+def _get_membership(user_db: SyncPostgrestClient, user_id: str):
+    result = (
+        user_db.table("tenant_members")
+        .select("tenant_id, role, tenants(name)")
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    return result.data[0] if result.data else None
+
+
 @router.post("/signup")
 def signup(payload: SignupRequest):
     try:
-        # 1. إنشاء المستخدم في Supabase Auth
-        auth_response = supabase.auth.sign_up({
-            "email": payload.email,
-            "password": payload.password,
-            "options": {
-                "data": {"full_name": payload.name}
+        auth_response = supabase.auth.sign_up(
+            {
+                "email": payload.email,
+                "password": payload.password,
+                "options": {
+                    "data": {
+                        "full_name": payload.name,
+                        "organization_name": payload.organization_name,
+                    }
+                },
             }
-        })
-        
+        )
+
         if not auth_response or not auth_response.user:
-            raise HTTPException(status_code=400, detail="Failed to create user in auth system")
-            
-        user_id = auth_response.user.id
-        
-        # 2. إنشاء المؤسسة الجديدة في جدول tenants
-        tenant_res = supabase.table("tenants").insert({
-            "name": payload.organization_name
-        }).execute()
-        
-        if not tenant_res.data or len(tenant_res.data) == 0:
-            raise HTTPException(status_code=500, detail="Failed to create organization/tenant")
-            
-        tenant_id = tenant_res.data[0]["id"]
-        
-        # 3. ربط المستخدم بالمؤسسة في جدول tenant_members بدور admin
-        member_res = supabase.table("tenant_members").insert({
-            "tenant_id": tenant_id,
-            "user_id": user_id,
-            "role": "admin"
-        }).execute()
-        
-        # جلب التوكن إذا تم تسجيل الدخول مباشرة بعد التسجيل
-        access_token = auth_response.session.access_token if auth_response.session else "mock_or_pending_token"
+            raise HTTPException(status_code=400, detail="Could not create account")
+
+        session = auth_response.session
+        tenant_id = None
+        if session:
+            user_db = create_user_database_client(session.access_token)
+            try:
+                tenant_id = _create_tenant_for_user(
+                    user_db, payload.organization_name
+                )
+            finally:
+                user_db.aclose()
 
         return {
-            "access_token": access_token,
-            "token_type": "bearer",
+            "status": "success" if session else "confirmation_required",
+            "email_confirmation_required": session is None,
+            "access_token": session.access_token if session else None,
+            "token_type": "bearer" if session else None,
             "user": {
-                "id": user_id,
+                "id": auth_response.user.id,
                 "name": payload.name,
                 "email": payload.email,
-                "role": "admin",
-                "tenant_id": tenant_id,
-                "organization": payload.organization_name
-            }
+                "role": "owner" if tenant_id else None,
+                "tenant_id": str(tenant_id) if tenant_id else None,
+                "organization": payload.organization_name,
+            },
         }
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Signup failed")
+        raise HTTPException(
+            status_code=400,
+            detail="Signup failed. Check the account state and server configuration.",
+        )
 
-# 🔑 مسار تسجيل الدخول
+
 @router.post("/login")
 def login(payload: LoginRequest):
     try:
-        auth_response = supabase.auth.sign_in_with_password({
-            "email": payload.email,
-            "password": payload.password
-        })
-        
+        auth_response = supabase.auth.sign_in_with_password(
+            {"email": payload.email, "password": payload.password}
+        )
         if not auth_response or not auth_response.session:
             raise HTTPException(status_code=401, detail="Invalid email or password")
-            
+
         user = auth_response.user
         access_token = auth_response.session.access_token
-        
-        # جلب معلومات الـ Tenant الخاصة بالمستخدم
-        membership = supabase.table("tenant_members").select("tenant_id, role, tenants(name)").eq("user_id", user.id).execute()
-        
-        tenant_id = None
-        role = None
-        org_name = None
-        
-        if membership.data and len(membership.data) > 0:
-            tenant_id = membership.data[0]["tenant_id"]
-            role = membership.data[0]["role"]
-            # جلب اسم المنظمة من العلاقة
-            org_data = membership.data[0].get("tenants")
-            if org_data:
-                org_name = org_data.get("name") if isinstance(org_data, dict) else None
+        user_db = create_user_database_client(access_token)
+        try:
+            membership = _get_membership(user_db, user.id)
+            metadata = user.user_metadata or {}
+
+            # Email-confirmed accounts are provisioned on their first sign-in.
+            if not membership and metadata.get("organization_name"):
+                _create_tenant_for_user(user_db, metadata["organization_name"])
+                membership = _get_membership(user_db, user.id)
+        finally:
+            user_db.aclose()
+
+        tenant_id = membership.get("tenant_id") if membership else None
+        role = membership.get("role") if membership else None
+        organization = None
+        if membership:
+            org_data = membership.get("tenants")
+            if isinstance(org_data, dict):
+                organization = org_data.get("name")
 
         return {
             "access_token": access_token,
             "token_type": "bearer",
             "user": {
                 "id": user.id,
-                "name": user.user_metadata.get("full_name", "مستخدم"),
+                "name": (user.user_metadata or {}).get("full_name", "مستخدم"),
                 "email": user.email,
                 "role": role,
                 "tenant_id": tenant_id,
-                "organization": org_name
-            }
+                "organization": organization,
+            },
         }
-    except Exception as e:
-        raise HTTPException(status_code=401, detail=f"Login failed: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Login failed")
+        raise HTTPException(status_code=401, detail="Login failed")
 
-# 👤 مسار جلب معلومات المستخدم الحالي وحالة الـ Tenant
+
 @router.get("/me")
-def get_user_profile(user = Depends(get_current_user)):
+def get_user_profile(
+    user: Any = Depends(get_current_user),
+    user_db: SyncPostgrestClient = Depends(get_user_db),
+):
     try:
-        user_id = user.id
-        
-        # البحث عما إذا كان المستخدم منضمًا إلى مؤسسة في جدول العضويات
-        membership = supabase.table("tenant_members").select("tenant_id, role, tenants(name)").eq("user_id", user_id).execute()
-        
-        has_tenant = False
-        tenant_id = None
-        role = None
-        org_name = None
-        
-        if membership.data and len(membership.data) > 0:
-            has_tenant = True
-            tenant_id = membership.data[0]["tenant_id"]
-            role = membership.data[0]["role"]
-            org_data = membership.data[0].get("tenants")
-            if org_data:
-                org_name = org_data.get("name") if isinstance(org_data, dict) else None
-            
+        membership = _get_membership(user_db, user.id)
+        metadata = user.user_metadata or {}
+        tenant_id = membership.get("tenant_id") if membership else None
+        role = membership.get("role") if membership else None
+        organization = None
+        if membership:
+            org_data = membership.get("tenants")
+            if isinstance(org_data, dict):
+                organization = org_data.get("name")
+
         return {
-            "id": user_id,
-            "name": user.user_metadata.get("full_name", "مستخدم"),
+            "id": user.id,
+            "name": metadata.get("full_name", "مستخدم"),
             "email": user.email,
-            "has_tenant": has_tenant,
+            "has_tenant": bool(membership),
             "tenant_id": tenant_id,
             "role": role,
-            "organization": org_name
+            "organization": organization,
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        logger.exception("Profile lookup failed")
+        raise HTTPException(status_code=500, detail="Could not load user profile")
