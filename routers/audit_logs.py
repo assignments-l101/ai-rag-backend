@@ -1,35 +1,26 @@
-from fastapi import APIRouter, Depends, HTTPException
-from routers.auth import get_current_user, get_user_db
+import logging
 
-router = APIRouter(prefix="/api/v1/audit-logs", tags=["Audit Logs & Security"])
+from fastapi import APIRouter, Depends, HTTPException
+
+from routers.auth import TenantContext, get_tenant_context, require_roles
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/api/v1/audit-logs", tags=["Audit Logs"])
+
 
 @router.get("")
-def get_audit_logs(user = Depends(get_current_user), user_db = Depends(get_user_db)):
-    user_id = user.id
-    
+def get_audit_logs(context: TenantContext = Depends(get_tenant_context)):
+    require_roles(context, "owner", "admin")
     try:
-        # 1. التحقق من المؤسسة التي ينتمي إليها المستخدم
-        membership = user_db.table("tenant_members").select("tenant_id, role").eq("user_id", user_id).execute()
-        if not membership.data or len(membership.data) == 0:
-            raise HTTPException(status_code=403, detail="User does not belong to any tenant")
-            
-        tenant_id = membership.data[0]["tenant_id"]
-        user_role = membership.data[0]["role"]
-        
-        # 2. التحقق من صلاحيات المستخدم (يُفضل أن يكون Owner أو Admin للاطلاع على السجلات الأمنية)
-        if user_role not in ["owner", "admin"]:
-            raise HTTPException(status_code=403, detail="Access denied: Only owners or admins can view audit logs")
-            
-        # 3. جلب سجلات التدقيق الخاصة بالمؤسسة من جدول audit_logs
-        logs_res = user_db.table("audit_logs").select("*").eq("tenant_id", tenant_id).order("created_at", desc=True).execute()
-        
-        return {
-            "status": "success",
-            "count": len(logs_res.data) if logs_res.data else 0,
-            "audit_logs": logs_res.data if logs_res.data else []
-        }
-        
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        result = (
+            context.user_db.table("audit_logs")
+            .select("id, tenant_id, user_id, action, details, created_at")
+            .eq("tenant_id", context.tenant_id)
+            .order("created_at", desc=True)
+            .execute()
+        )
+        logs = result.data or []
+        return {"status": "success", "count": len(logs), "audit_logs": logs}
+    except Exception:
+        logger.exception("Audit log lookup failed for tenant %s", context.tenant_id)
+        raise HTTPException(status_code=500, detail="Could not load audit logs")
